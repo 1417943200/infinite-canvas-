@@ -2626,7 +2626,7 @@ function InfiniteCanvasPage() {
                                         ),
                                     );
                                 },
-                                { signal: controller.signal },
+                                { signal: controller.signal, videos: generationContext.referenceVideos, audios: generationContext.referenceAudios },
                             );
                             const content = answer || streamed;
                             setNodes((prev) =>
@@ -2767,7 +2767,7 @@ function InfiniteCanvasPage() {
                             streamed = text;
                             setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, type: CanvasNodeType.Text, metadata: { ...item.metadata, content: text, status: NODE_STATUS_LOADING } } : item)));
                         },
-                        { signal: controller.signal },
+                        { signal: controller.signal, videos: context.referenceVideos, audios: context.referenceAudios },
                     );
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, type: CanvasNodeType.Text, metadata: { ...item.metadata, content: answer || streamed, prompt, status: NODE_STATUS_SUCCESS } } : item)));
                     return;
