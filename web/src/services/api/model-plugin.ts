@@ -170,8 +170,8 @@ export function getPluginVariables(): PluginVariable[] {
     return [
         { name: "prompt", type: "string", desc: i18n.t("modelPlugin.variables.prompt"), capabilities: ["image", "video", "audio"] },
         { name: "images", type: "string[]", desc: i18n.t("modelPlugin.variables.images"), capabilities: ["image", "video"] },
-        { name: "videos", type: "File[]", desc: i18n.t("modelPlugin.variables.videos"), capabilities: ["video"] },
-        { name: "audios", type: "File[]", desc: i18n.t("modelPlugin.variables.audios"), capabilities: ["video"] },
+        { name: "videos", type: "File[]", desc: i18n.t("modelPlugin.variables.videos"), capabilities: ["text", "video"] },
+        { name: "audios", type: "File[]", desc: i18n.t("modelPlugin.variables.audios"), capabilities: ["text", "video"] },
         { name: "messages", type: "{ role, content }[]", desc: i18n.t("modelPlugin.variables.messages"), capabilities: ["text"] },
         { name: "params", type: "object", desc: i18n.t("modelPlugin.variables.params") },
         { name: "model", type: "string", desc: i18n.t("modelPlugin.variables.model") },
@@ -906,9 +906,11 @@ return await generateText({
         {
             label: i18n.t("modelPlugin.templates.gemini"),
             script: `/**
- * Gemini text: POST models/{model}:generateContent.
+ * Gemini multimodal text: POST models/{model}:generateContent.
  * System messages are skipped in contents; systemPrompt goes to systemInstruction.
- * @param {{role: string, content: string}[]} messages
+ * @param {{role: string, content: string|object[]}[]} messages
+ * @param {File[]} videos - reference videos for understanding
+ * @param {File[]} audios - reference audio for understanding
  * @param {string} systemPrompt
  * @param {string} model
  * @param {string} baseUrl
@@ -919,6 +921,8 @@ return await generateText({
  */
 async function generateText({
   messages,
+  videos,
+  audios,
   systemPrompt,
   model,
   baseUrl,
@@ -926,13 +930,48 @@ async function generateText({
   request,
   onDelta,
 }) {
+  async function filePart(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 32768) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+    }
+    return {
+      inline_data: {
+        mime_type: file.type || "application/octet-stream",
+        data: btoa(binary),
+      },
+    };
+  }
+
+  function messageParts(content) {
+    if (!Array.isArray(content)) return [{ text: String(content || "") }];
+    return content.flatMap((item) => {
+      if (item.type === "text") return [{ text: item.text || "" }];
+      const url = item.image_url && item.image_url.url;
+      if (!url) return [];
+      const match = url.match(/^data:([^;]+);base64,(.*)$/);
+      return match
+        ? [{ inline_data: { mime_type: match[1], data: match[2] } }]
+        : [{ file_data: { file_uri: url, mime_type: "image/png" } }];
+    });
+  }
+
   const contents = [];
   for (const message of messages) {
     if (message.role === "system") continue;
     contents.push({
       role: message.role === "assistant" ? "model" : "user",
-      parts: [{ text: message.content }],
+      parts: messageParts(message.content),
     });
+  }
+  let userContent = contents.length ? contents[contents.length - 1] : null;
+  if (!userContent || userContent.role !== "user") {
+    userContent = { role: "user", parts: [] };
+    contents.push(userContent);
+  }
+  for (const file of [...videos, ...audios]) {
+    userContent.parts.push(await filePart(file));
   }
   const body = {
     contents: contents,
@@ -942,9 +981,13 @@ async function generateText({
       parts: [{ text: systemPrompt }],
     };
   }
+  const rootBaseUrl = baseUrl.replace(/\/+$/, "");
+  const nativeBaseUrl = /^https:\/\/(?:www\.)?aihubmix\.com$/i.test(rootBaseUrl)
+    ? rootBaseUrl + "/gemini"
+    : rootBaseUrl;
   const data = await request({
     method: "post",
-    url: \`\${baseUrl}/v1beta/models/\${model}:generateContent\`,
+    url: \`\${nativeBaseUrl}/v1beta/models/\${model}:generateContent\`,
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": apiKey,
@@ -961,6 +1004,8 @@ async function generateText({
 
 return await generateText({
   messages,
+  videos,
+  audios,
   systemPrompt,
   model,
   baseUrl,
