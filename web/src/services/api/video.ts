@@ -4,8 +4,9 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio } from "@/lib/media-size";
-import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
+import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
+import { referenceMediaToFile } from "@/services/reference-media";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
@@ -287,22 +288,6 @@ function parseDataUrlInline(dataUrl: string, fallbackType = "image/png"): Gemini
 
 async function fileToGeminiInline(file: File): Promise<GeminiInlineData> {
     return parseDataUrlInline(await readFileAsDataUrl(file), file.type || "application/octet-stream");
-}
-
-async function referenceMediaToFile(item: { name: string; type?: string; url?: string; storageKey?: string }, fallbackName: string, errorKey: "invalidReferenceVideo" | "invalidReferenceAudio", options?: RequestOptions) {
-    let blob = item.storageKey ? await getMediaBlob(item.storageKey) : null;
-    if (!blob) {
-        const url = item.storageKey ? await resolveMediaUrl(item.storageKey, item.url || "") : item.url || "";
-        if (!url) throw new Error(apiText(errorKey));
-        try {
-            blob = await (await fetch(url, { signal: options?.signal })).blob();
-        } catch (error) {
-            if (error instanceof DOMException && error.name === "AbortError") throw error;
-            throw new Error(apiText(errorKey));
-        }
-    }
-    if (!blob.size) throw new Error(apiText(errorKey));
-    return new File([blob], item.name || fallbackName, { type: item.type || blob.type || "application/octet-stream" });
 }
 
 function normalizeVideoSeconds(value: string) {
