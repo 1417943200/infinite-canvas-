@@ -4,11 +4,13 @@ import i18n from "@/i18n";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
-import { dataUrlToFile } from "@/lib/image-utils";
+import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { imageToDataUrl } from "@/services/image-storage";
+import { referenceMediaToFile } from "@/services/reference-media";
 import { imageSizePresets, inferMediaScale } from "@/lib/media-size";
 import type { ReferenceImage } from "@/types/image";
+import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
@@ -96,6 +98,7 @@ type GeminiPayload = {
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
 type RequestOptions = { signal?: AbortSignal };
+type TextMediaOptions = RequestOptions & { videos?: ReferenceVideo[]; audios?: ReferenceAudio[] };
 
 const QUALITY_BASE: Record<string, number> = {
     low: 1024,
@@ -544,6 +547,32 @@ function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?
     };
 }
 
+async function withGeminiReferenceMedia(body: Record<string, unknown>, files: File[]) {
+    if (!files.length) return body;
+    const contents = (body.contents as GeminiContent[] | undefined) || [];
+    let userContent = [...contents].reverse().find((content) => content.role === "user");
+    if (!userContent) {
+        userContent = { role: "user", parts: [] };
+        contents.push(userContent);
+    }
+    const mediaParts = await Promise.all(files.map(async (file) => toGeminiImagePart(await readFileAsDataUrl(file))));
+    userContent.parts.unshift(...mediaParts);
+    return { ...body, contents };
+}
+
+function aihubmixGeminiConfig(config: AiConfig) {
+    const model = config.model.toLowerCase();
+    if (!model.includes("gemini")) return null;
+    try {
+        const url = new URL(config.baseUrl);
+        if (url.hostname !== "aihubmix.com" && url.hostname !== "www.aihubmix.com") return null;
+        url.pathname = `${url.pathname.replace(/\/(?:v1|v1beta)?\/?$/i, "").replace(/\/$/, "")}/gemini`;
+        return { ...config, apiFormat: "gemini" as const, baseUrl: url.toString().replace(/\/$/, "") };
+    } catch {
+        return null;
+    }
+}
+
 function toGeminiContents(messages: ResponseInputMessage[]): GeminiContent[] {
     const callNameById = new Map<string, string>();
     return messages.flatMap((message): GeminiContent[] => {
@@ -846,9 +875,11 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 }
 
-export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
+export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: TextMediaOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
     const script = resolveModelScript(config, config.model || config.textModel);
+    const videos = await Promise.all((options?.videos || []).map((video) => referenceMediaToFile(video, "reference.mp4", "invalidReferenceVideo", options)));
+    const audios = await Promise.all((options?.audios || []).map((audio) => referenceMediaToFile(audio, "reference.mp3", "invalidReferenceAudio", options)));
     if (script) {
         try {
             const answer = await runModelPlugin<string>({
@@ -856,6 +887,8 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
                 script,
                 config: requestConfig,
                 messages: withSystemMessage(requestConfig, messages),
+                videos,
+                audios,
                 signal: options?.signal,
                 onDelta,
             });
@@ -867,8 +900,10 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
         }
     }
     try {
-        if (requestConfig.apiFormat === "gemini") {
-            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages), onDelta, options)).content || apiText("noContent");
+        const geminiConfig = requestConfig.apiFormat === "gemini" ? requestConfig : videos.length || audios.length ? aihubmixGeminiConfig(requestConfig) : null;
+        if (geminiConfig) {
+            const body = await withGeminiReferenceMedia(toGeminiBody(geminiConfig, messages), [...videos, ...audios]);
+            const answer = (await requestGeminiStreamingResponse(geminiConfig, body, onDelta, options)).content || apiText("noContent");
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         }
